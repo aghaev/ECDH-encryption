@@ -1,54 +1,64 @@
 
-// Rsa class which generates a public private key pair and encrypts and decrypts data using the public key and private key respectively.
+import Foundation
+import Security
+import UIKit
+
 class Rsa {
 
-    let tag = UIdevice.current.identifierForVendor!.uuidString
+    let tag = UIDevice.current.identifierForVendor!.uuidString //.data(using: .utf8)
+    var privateKey: SecKey?
 
-    let publicKey: SecKey
-    let privateKey: SecKey
-
+// MARK: - Initialization
     init() {
         guard let privateKey = getPrivateKeyFromKeychain() else {
-            generateKeys()
+            generatePrivateKey()
             return
         }
-        guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
-            fatalError("Error generating public key")
+        self.privateKey = privateKey
+    }
+
+// MARK: - Private methods
+    private func generatePrivateKey() {
+        let attributes = getPrivateKeyAttributes()
+        var error: Unmanaged<CFError>?
+        guard let privateKey: SecKey = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
+            fatalError("Error generating private key: \(error.debugDescription)")
         }
         self.privateKey = privateKey
-        self.publicKey = publicKey
-        updatePubKeyOnServer()
-    }
-
-   // func generates public private key
-   func generateKeys() { 
-    let attributes = getPrivateKeyAttributes()
-    var error: Unmanaged<CFError>?
-    guard let privateKey = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
-        fatalError("Error generating private key: \(error.debugDescription)")
-    }
-    guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
-        fatalError("Error generating public key")
-    }
-    self.publicKey = publicKey
-    self.privateKey = privateKey
    }
 
-   // decode public key
-    func getPublicKey() -> String {
-        let keyData = SecKeyCopyExternalRepresentation(privateKey)! as Data
-        let keyBase64 = keyData.base64EncodedString()
-        return keyBase64
-    } 
+    private func generatePublicKey(privateKey: SecKey) -> SecKey? {
+        let publicKey: SecKey? = SecKeyCopyPublicKey(privateKey)
+        return publicKey
+    }
 
-   // func get private key from keychain
-    func getPrivateKeyFromKeychain() -> SecKey? {
+    private func getPublicKeyToExport(publicKey: SecKey) -> String {
+        guard 
+            SecKeyIsAlgorithmSupported(publicKey, .encrypt, .rsaEncryptionPKCS1),
+            let keyData: CFData = SecKeyCopyExternalRepresentation(publicKey, nil)
+        else { return "" }
+        let keyBase64: String = (keyData as Data).base64EncodedString()
+        return keyBase64
+    }
+
+    private func decodePublicKeyFromBase64(keyBase64: String) -> SecKey? {
+        guard
+            let keyData: Data = Data(base64Encoded: keyBase64),
+            let key: SecKey = SecKeyCreateWithData(keyData as CFData, [
+                kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
+                kSecAttrKeyClass as String: kSecAttrKeyClassPublic
+            ] as CFDictionary, nil)
+        else { return nil }
+        return key
+    }
+
+    private func getPrivateKeyFromKeychain() -> SecKey? {
         let query: CFDictionary = [
-            kSecClass: kSecClassKey,
-            kSecAttrApplicationTag: tag.data(using: .utf8)!,
-            kSecAttrKeyType: kSecAttrKeyTypeRSA,
-            kSecReturnRef: true
-        ]
+            kSecClass as String: kSecClassKey,
+            kSecAttrApplicationTag as String: tag.data(using: .utf8)!,
+            kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
+            kSecReturnRef as String: true
+        ] as CFDictionary
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query, &item)
         guard status == errSecSuccess else {
@@ -57,30 +67,53 @@ class Rsa {
         return item as! SecKey?
     }
 
-   // func encrypts data using public key
-    func encrypt(data: Data) -> Data? {
-    
-    }
 
-    // func decrypts data using private key
-    func decrypt(data: Data) -> Data? {
-
-    
-    }
-
-    // func gets attributes of private key
-    func getPrivateKeyAttributes() -> CFdictionary {
-        let attributes: CFdictionary = [
-            kSecAttrKeyType: kSecAttrKeyTypeRSA,
-            kSecAttrKeySizeInBits: 2048,
+    private func getPrivateKeyAttributes() -> CFDictionary {
+        let attributes: CFDictionary = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
+            kSecAttrKeySizeInBits as String: 2048,
             kSecPrivateKeyAttrs: [
-                kSecAttrIsPermanent: true,
-                kSecAttrApplicationTag: tag.data(using: .utf8)!
+                kSecAttrIsPermanent as String: true,
+                kSecAttrApplicationTag as String: tag.data(using: .utf8)!
             ]
-        ]
-        return attributes 
+        ] as CFDictionary
+        return attributes
     }
-    func updatePubKeyOnServer() {
 
+// MARK: - Encreption/Decryption
+    func encrypt(data: Data?, keyBase64: String) -> Data? {
+        guard 
+            let publicKey: SecKey = decodePublicKeyFromBase64(keyBase64: keyBase64),
+            SecKeyIsAlgorithmSupported(publicKey, .encrypt, .rsaEncryptionPKCS1),
+            let data: Data = data
+        else { return nil }
+        var error: Unmanaged<CFError>?
+        guard let encryptedData: Data = SecKeyCreateEncryptedData(publicKey, .rsaEncryptionPKCS1, data as CFData, &error) as? Data else {
+            fatalError("Error encrypting data: \(error.debugDescription)")
+        }
+        return encryptedData
+    }
+
+    func decrypt(data: Data?) -> Data? {
+        guard
+            let privateKey: SecKey = privateKey,
+            SecKeyIsAlgorithmSupported(privateKey, .decrypt, .rsaEncryptionPKCS1),
+            let data: Data = data
+        else { return nil }
+        var error: Unmanaged<CFError>?
+        guard let decryptedData: Data = SecKeyCreateDecryptedData(privateKey, .rsaEncryptionPKCS1, data as CFData, &error) as? Data else {
+            fatalError("Error decrypting data: \(error.debugDescription)")
+        }
+        return decryptedData
+    }
+
+// MARK: - Public key update on server 
+    func updatePubKeyOnServer() {
+        guard
+            let privateKey: SecKey,
+            let publicKey: SecKey = generatePublicKey(privateKey: privateKey),
+            let pubKey: String = getPublicKeyToExport(publicKey: publicKey)
+        else { return }
+        // TODO: update pub key on server
     }
 }
